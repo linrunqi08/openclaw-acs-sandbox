@@ -4,7 +4,7 @@
 
 ## 概述
 
-OpenClaw 是一款开源的 AI 编程助手，支持多平台运行。本服务基于阿里云 ACS（容器计算服务）和 OpenKruise Agents 框架，提供企业级的一键部署方案。
+OpenClaw 是一款开源的 AI 编程助手，支持多平台运行。本服务基于阿里云 ACS（容器计算服务）和 E2B框架，提供企业级的一键部署方案。
 
 ### 核心特性
 
@@ -85,6 +85,37 @@ sudo cp /etc/letsencrypt/live/your.domain/privkey.pem ./privkey.pem
    - **镜像缓存名**：`openclaw-image-cache`
    - **镜像**：`registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/openclaw:2026.3.2`
 4. 等待状态变为「制作完成」
+
+**步骤三：在 SandboxSet 中启用镜像缓存**
+
+对于已有集群，需要修改 SandboxSet 配置启用镜像缓存：
+
+```bash
+kubectl edit sandboxset openclaw
+```
+
+在 Pod template 的 annotations 中添加：
+
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: openclaw
+spec:
+  template:
+    metadata:
+      annotations:
+        # 启用镜像缓存加速
+        image.alibabacloud.com/enable-image-cache: "true"
+    spec:
+      containers:
+        - name: openclaw
+          image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/openclaw:2026.3.2
+          # 必须设置为 Always，否则缓存不生效
+          imagePullPolicy: Always
+```
+
+> **重要**：`imagePullPolicy` 必须设置为 `Always`，镜像缓存才能生效。
 
 **计费说明**：每个地域免费 20 个镜像缓存，超出部分 0.18 元/GiB/月
 
