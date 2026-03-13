@@ -240,33 +240,6 @@ print(result)
 sbx.kill()
 ```
 
-### 休眠与唤醒（Pause & Resume）
-
-> **注意**：休眠/唤醒功能需联系阿里云开启白名单
-
-```python
-from e2b_code_interpreter import Sandbox
-
-# 创建沙箱并执行代码
-sbx = Sandbox.create(template="openclaw", timeout=300)
-sbx.run_code("a = 1")
-sbx.run_code("print(f'Before pause: a = {a}')")
-
-# 休眠沙箱（保留内存状态）
-sandbox_id = sbx.sandbox_id
-sbx.beta_pause()
-print(f"Sandbox {sandbox_id} paused")
-
-# ... 一段时间后 ...
-
-# 唤醒沙箱（恢复内存状态）
-sbx = Sandbox.connect(sandbox_id)
-sbx.run_code("print(f'After resume: a = {a}')")  # 变量 a 仍然存在
-
-# 销毁沙箱
-sbx.kill()
-```
-
 **典型应用场景**：
 - 长时间不活跃的会话暂停以节省资源
 - 用户离线后保存工作状态，上线后恢复
