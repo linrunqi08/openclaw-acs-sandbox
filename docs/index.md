@@ -1,211 +1,349 @@
-# 在ACS集群中使用 E2B 管理安全沙箱
+# OpenClaw 企业版部署指南
+
+> 基于 ACS Agent Sandbox 构建企业级 AI Agent 应用
 
 ## 概述
 
-E2B 是一个流行的开源安全沙箱框架，提供了一套简单易用的 Python 与 JavaScript SDK 供用户对安全沙箱进行创建、查询、执行代码、请求端口等操作。
-ack-sandbox-manager组件是一个兼容 E2B 协议的后端应用，使用户在任何 K8s 集群中一键搭建一个性能媲美原生 E2B 的沙箱基础设施。
+OpenClaw 是一款开源的 AI 编程助手，支持多平台运行。本服务基于阿里云 ACS（容器计算服务）和 E2B框架，提供企业级的一键部署方案。
 
-本服务提供了在ACS 集群中快速搭建安全沙箱的解决方案，支持使用 E2B 协议进行交互，并默认准备了openclaw沙箱。
+### 核心特性
 
-预计部署时间： 10分钟
+- **秒级沙箱启动**：通过 SandboxSet 预热池 + 镜像缓存实现亚秒级沙箱交付
+- **会话状态保持**：支持沙箱休眠与唤醒，保留内存状态
+- **持久化存储**：集成 NAS 文件存储，数据跨会话持久化
+- **E2B 协议兼容**：支持原生 E2B SDK，无缝迁移现有应用
+
+### 部署方式对比
+
+| 部署方式 | 难度 | 时间 | 适用场景 |
+|---------|------|------|---------|
+| **计算巢控制台** | ⭐ 简单 | 10-15分钟 | 快速体验、测试环境、生产环境 |
+| **手动部署** | ⭐⭐⭐ 复杂 | 30-60分钟 | 定制化需求、学习研究 |
 
 ## 前提准备
 
-标准的 E2B 协议需要一个域名（E2B_DOMAIN）来指定后端服务。为此，您需要准备一个自己的域名。
-E2B 客户端必须通过 HTTPS 协议请求后端，因此还需要为服务申请一个通配符证书。
+### 1. 准备域名
 
-以下介绍了测试场景下的域名和证书准备步骤，生成的fullchain.pem和privkey.pem文件在后续部署环节会用到。
+E2B 协议需要一个域名（E2B_DOMAIN）来指定后端服务。
 
-#### 准备域名
-- 测试场景中，为了方便验证，可以使用测试域名，比如示例：agent-vpc.infra,
+- **测试环境**：可使用测试域名，如 `agent-vpc.infra`（需配置 hosts 或 PrivateZone）
+- **生产环境**：
+  - 参考 [域名注册快速入门](https://help.aliyun.com/document_detail/35789.html)
+  - 中国内地部署需要 [域名备案](https://beian.aliyun.com/)
 
-#### 获取自签名证书
-通过脚本[generate-certificate.sh](https://github.com/openkruise/agents/blob/master/hack/generate-certificates.sh) 创建自签名证书。 您可以通过以下命令查看脚本的使用方法。
+### 2. 获取 TLS 证书
+
+E2B 客户端通过 HTTPS 请求后端，需要申请通配符证书。
+
+**测试环境 - Let's Encrypt 免费证书：**
+
 ```bash
-$ bash generate-certificates.sh --help
+# 安装 certbot
+brew install certbot  # macOS
+# 或 snap install certbot  # Linux
 
-Usage: generate-certificates.sh [OPTIONS]
+# 申请通配符证书
+sudo certbot certonly \
+  --manual \
+  --preferred-challenges=dns \
+  --email your-email@example.com \
+  --server https://acme-v02.api.letsencrypt.org/directory \
+  --agree-tos \
+  -d "*.your.domain.cn"
 
-Options:
-  -d, --domain DOMAIN     Specify certificate domain (default: your.domain.com)
-  -o, --output DIR        Specify output directory (default: .)
-  -D, --days DAYS         Specify certificate validity days (default: 365)
-  -h, --help              Show this help message
-
-Examples:
-  generate-certificates.sh -d myapp.your.domain.com
-  generate-certificates.sh --domain api.your.domain.com --days 730
+# 导出证书
+sudo cp /etc/letsencrypt/live/your.domain/fullchain.pem ./fullchain.pem
+sudo cp /etc/letsencrypt/live/your.domain/privkey.pem ./privkey.pem
 ```
-生成证书的命令示例：
+
+**生产环境**：推荐 [购买正式证书](https://help.aliyun.com/document_detail/28542.html)
+
+### 3. 获取百炼 API Key
+
+登录 [百炼控制台](https://bailian.console.aliyun.com/) 创建 API Key，用于 AI 模型调用。
+
+### 4. 配置镜像缓存加速（可选但强烈推荐）
+
+镜像缓存可显著加速 ACS Pod 启动，将镜像拉取时间从**分钟级降低到秒级**。
+
+> **重要说明**：镜像缓存功能需要在 **ACS 集群层面** 申请白名单开通，无法通过 ROS 模板自动配置。请在部署前完成以下步骤。
+
+**步骤一：申请镜像缓存白名单**
+
+1. [提交工单](https://smartservice.console.aliyun.com/service/create-ticket) 申请开通镜像缓存功能
+2. 工单标题建议填写：「申请开通 ACS 镜像缓存功能」
+3. 内容中注明需要开通的地域和账号 UID
+4. 等待工单处理完成（通常 1-2 个工作日）
+
+**步骤二：创建镜像缓存**
+
+白名单开通后，创建镜像缓存：
+
+1. 登录 [容器计算服务控制台](https://acs.console.aliyun.com/)
+2. 左侧导航栏选择「镜像缓存」→「创建镜像缓存」
+3. 配置：
+   - **镜像缓存名**：`openclaw-image-cache`
+   - **镜像**：`registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/openclaw:2026.3.2`
+4. 等待状态变为「制作完成」
+
+**步骤三：在 SandboxSet 中启用镜像缓存**
+
+对于已有集群，需要修改 SandboxSet 配置启用镜像缓存：
+
 ```bash
-./generate-certificates.sh --domain agent-vpc.infra --days 730
+kubectl edit sandboxset openclaw
 ```
-完成证书生成后，您会得到以下文件：
 
-- fullchain.pem：服务器证书公钥
-- privkey.pem：服务器证书私钥
-- ca-fullchain.pem：CA 证书公钥
-- ca-privkey.pem：CA 证书私钥
-该脚本会同时生成单域名（your.domain）与泛域名（*.your.domain）证书，兼容原生 E2B 协议与 OpenKruise 定制 E2B 协议。
+在 Pod template 的 annotations 中添加：
 
-## 部署流程
-
-1. 打开计算巢服务[部署链接](https://computenest.console.aliyun.com/service/instance/create/cn-hangzhou?type=user&ServiceId=service-47d7c54c78604e0bbe79)
-2. 填写相关部署参数、选择部署地域、ACS集群的Service CIDR, 专有网络配置![img_1.png](img_1.png) 
-3. 填写E2B 域名配置，E2B的访问域名配置为上述前提准备阶段的域名， 
-   1. TLS 证书选择fullchain.pem文件
-   2. TLS 证书私钥选择privkey.pem文件
-         ![img.png](img.png)
-4. 会生成访问E2B API的 E2B_API_KEY
-5. sandbox-manager 组件默认的CPU和内存配置默认为2C, 4Gi, 可以按需调整
-6. 配置完成后，点击确认订单
-7. 部署成功后，在服务实例的详情页也可以查看E2B_API_KEY、E2B_DOMAIN等信息
-         ![img_4.png](img_4.png)
-
-## 使用沙箱
- 
- 部署完成后，会得到一个对应的ACS集群，ACS集群中在sandbox-system命名空间下有sandbox-manager的Deployment，用于管理沙箱。
- 通过以下流程验证E2B服务已经正常运行，并介绍沙箱使用Demo.
-
-### 配置域名的解析
-
-#### 本地配置Host: 用于快速验证
-1. 获取ALB的访问端点：ack-sandbox-manager 集群中使用Alb作为Ingress，在服务实例详情页，可以找到找到ACS控制台的链接，点击链接查看sandbox-manager的网关，可以获取ALB的访问端点，如下图所示
-![img_2.png](img_2.png)
-2. 获取Alb端点对应的公网地址：本地通过ping ALB的访问端点得到公网Ip 
-```ping alb-xxxxxx```
-3. 将ALB的公网地址和域名配置到本地host：```echo "ALB_PUBLIC_IP api.E2B_DOMAIN" >> /etc/hosts```
-示例为： 
-```xx.xxx.xx.xxx api.agent-vpc.infra```
-4. 配置完Host后，无需配置DNS解析，在本地就可以管理E2B沙箱，具体使用方式，参考“使用沙箱demo”章节。
-
-#### 配置DNS解析：用于生产环境
-1. 获取ALB的访问端点：
-ack-sandbox-manager 集群中使用Alb作为Ingress，在服务实例详情页，可以找到找到ACS控制台的链接，点击链接查看sandbox-manager的网关，可以获取ALB的访问端点，如下图所示
-![img_2.png](img_2.png)
-2. 配置DNS解析： 
-请将Alb的访问端点 以 CNAME 记录类型解析到对应域名，
-![img_5.png](img_5.png)
-3. 如需通过内网访问，可以通过PrivateZone 为E2B 添加内网域名。(如果部署时选择了新建VPC, 已经为您自动配置了PrivateZone，后续只需要添加解析记录)【可选】
-
-### 使用沙箱demo
-
-#### 创建沙箱
-当前已默认帮创建了沙箱。以下仅为参考
-注意：以下示例中是从杭州地域拉取镜像，若部署在其他地域，首次拉取耗时较长大约需要5分钟，请耐心等待，也可替换image中的regionId为其他地域。
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
 kind: SandboxSet
 metadata:
   name: openclaw
-  namespace: default
-  annotations:
-    e2b.agents.kruise.io/should-init-envd: "true"
-  labels:
-    app: openclaw
 spec:
-  replicas: 1
   template:
     metadata:
-      labels:        
-        alibabacloud.com/acs: "true" # 使用ACS算力
-        app: openclaw
       annotations:
-        network.alibabacloud.com/pod-with-eip: "true" # 表示为每个Pod自动分配一个EIP实例
-        network.alibabacloud.com/eip-bandwidth: "5" # 表示EIP实例带宽为5 Mbps
+        # 启用镜像缓存加速
+        image.alibabacloud.com/enable-image-cache: "true"
     spec:
-      initContainers:
-        - name: init
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.2
-          imagePullPolicy: IfNotPresent
-          command: [ "sh", "/workspace/entrypoint_inner.sh" ]
-          volumeMounts:
-            - name: envd-volume
-              mountPath: /mnt/envd
-          env:
-            - name: ENVD_DIR
-              value: /mnt/envd
-            - name: __IGNORE_RESOURCE__
-              value: "true"
-          restartPolicy: Always
       containers:
         - name: openclaw
-          image: registry.cn-hangzhou.aliyuncs.com/acs-samples/clawdbot:2026.1.24.3         
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            readOnlyRootFilesystem: false
-            runAsUser: 0
-            runAsGroup: 0
-          resources:
-            requests:
-              cpu: 4
-              memory: 8Gi
-            limits:
-              cpu: 4
-              memory: 8Gi
-          env:
-            - name: ENVD_DIR
-              value: /mnt/envd
-            - name: DASHSCOPE_API_KEY 
-              value: sk-xxxxxxxxxxxxxxxxx # 替换为您真实的API_KEY
-            - name: GATEWAY_TOKEN 
-              value: clawdbot-mode-123456 # 替换为您希望访问OpenClaw的token
-          volumeMounts:
-            - name: envd-volume
-              mountPath: /mnt/envd            
-          startupProbe:
-            tcpSocket:
-              port: 18789
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 30
-          lifecycle:
-            postStart:
-              exec:
-                command: [ "/bin/bash", "-c", "/mnt/envd/envd-run.sh" ]        
-      terminationGracePeriodSeconds: 1
-      volumes:
-        - emptyDir: { }
-          name: envd-volume
+          image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/openclaw:2026.3.2
+          # 必须设置为 Always，否则缓存不生效
+          imagePullPolicy: Always
 ```
-通过kubectl 创建上述资源，SandboxSet创建完成后，可以看到1个沙箱已经处于可用状态：
-![img_6.png](img_6.png)
+
+> **重要**：`imagePullPolicy` 必须设置为 `Always`，镜像缓存才能生效。
+
+**计费说明**：每个地域免费 20 个镜像缓存，超出部分 0.18 元/GiB/月
+
+**支持地域**：华北2（北京）、华东2（上海）、华东1（杭州）、华北6（乌兰察布）、华南1（深圳）、中国香港、新加坡
+
+> **注意**：如果未开通镜像缓存白名单，Pod 启动时会报 403 错误。
+
+## 方式一：计算巢控制台部署（推荐新手）
+
+1. **访问计算巢服务**
+   
+   打开 [计算巢服务部署链接](https://computenest.console.aliyun.com/)，搜索 **ack-sandbox-manager**
+
+2. **填写部署参数**
+
+   | 参数组 | 参数 | 说明 |
+   |-------|------|------|
+   | 基本配置 | 地域 | 选择就近地域（cn-hangzhou、cn-beijing 等） |
+   | | 可用区 | 选择两个不同的可用区（高可用） |
+   | | VPC 配置 | 新建或使用已有 VPC |
+   | E2B 配置 | E2B 域名 | 前提准备阶段的域名 |
+   | | TLS 证书 | 上传 `fullchain.pem` |
+   | | TLS 证书私钥 | 上传 `privkey.pem` |
+
+3. **确认部署**
+
+   点击「确认订单」开始部署，约需 10-15 分钟。
+
+4. **获取访问信息**
+
+   部署成功后，在服务实例详情页查看：
+   - **E2B_API_KEY**：访问 E2B API 的密钥
+   - **E2B_DOMAIN**：E2B 域名
+   - **ClusterId**：ACS 集群 ID
+
+## 部署后配置
+
+### 安装 EIP 组件（可选）
+
+如需为 Pod 分配独立公网 IP，需要安装 `ack-extend-network-controller` 组件：
+
+**方式 A - 控制台安装（推荐）：**
+
+1. 登录 [容器服务控制台](https://cs.console.aliyun.com/)
+2. 进入集群详情 → 「组件管理」
+3. 搜索 `ack-extend-network-controller`，点击「安装」
+4. 配置参数（使用默认值即可），确认安装
 
 
-#### 设置环境变量
+
+**验证安装：**
+
+直至组件显示安装成功
+
+### 为 Pod 配置 EIP
+
+安装 EIP 组件后，可通过 Pod annotation 为沙箱分配独立公网 IP：
+
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: openclaw
+spec:
+  template:
+    metadata:
+      annotations:
+        # 启用 Pod EIP
+        network.alibabacloud.com/pod-with-eip: "true"
+        # EIP 带宽（Mbps）
+        network.alibabacloud.com/eip-bandwidth: "5"
+```
+
+**查看 Pod EIP：**
+
+```bash
+kubectl get pod -o wide
+kubectl describe pod <pod-name> | grep -i eip
+```
+
+### 配置域名解析
+
+**本地测试（Hosts 方式）：**
+
+```bash
+# 获取 ALB 公网 IP
+kubectl get ingress -n sandbox-system
+
+# 配置 hosts
+echo "<ALB_IP> api.your.domain.cn" >> /etc/hosts
+```
+
+**生产环境（DNS 解析）：**
+
+将域名以 CNAME 记录解析到 ALB 端点。
+
+## 使用 E2B SDK
+
+### 环境配置
 
 ```bash
 export E2B_DOMAIN=your.domain.cn
-export E2B_API_KEY=xxxxx
+export E2B_API_KEY=your-admin-api-key
 
-export SSL_CERT_FILE=/path/to/ca-fullchain.pem #使用本地配置Host的方式进行验证时，需要声明此变量
-
+pip install e2b-code-interpreter
 ```
 
-#### 执行代码
-以下脚本演示了沙箱的删除，Sandboxset 会从预热池中快速分配一个沙箱实例，完成分配的同时，SandboxSet会删除旧的沙箱
-```python
-import os
+### 基本用法
 
-# Import the E2B SDK
+```python
 from e2b_code_interpreter import Sandbox
 
-# Create a sandbox using the E2B Python SDK
-# 这里 template 名字要和 SandboxSet 名字保持一致
-sbx = Sandbox.create(template="openclaw", timeout=60,  
-                     metadata={
-                        "e2b.agents.kruise.io/never-timeout": "true"
-                    }
-)
-print(f"sandbox id: {sbx.sandbox_id}")
+# 创建沙箱（从预热池秒级分配）
+sbx = Sandbox.create(template="openclaw", timeout=300)
+print(f"Sandbox ID: {sbx.sandbox_id}")
 
+# 执行代码
+result = sbx.run_code("print('Hello, OpenClaw!')")
+print(result)
+
+# 销毁沙箱
 sbx.kill()
-print(f"sandbox {sbx.sandbox_id} killed")
 ```
-预期输出
-```html
-sandbox id: default--openclaw-22j5l
-sandbox default--openclaw-22j5l killed
+
+**典型应用场景**：
+- 长时间不活跃的会话暂停以节省资源
+- 用户离线后保存工作状态，上线后恢复
+- 跨会话保持执行上下文
+
+## 架构说明
 
 ```
-当预期返回中有沙箱Id时，可以认为E2B 服务已经正常运行了
+┌─────────────────────────────────────────────────────────────┐
+│                         ACS 集群                            │
+│  ┌──────────────────┐  ┌──────────────────────────────────┐ │
+│  │ sandbox-manager  │  │        SandboxSet (预热池)       │ │
+│  │  (E2B 兼容 API)  │  │  ┌─────────┐ ┌─────────┐        │ │
+│  └────────┬─────────┘  │  │ Sandbox │ │ Sandbox │ ...    │ │
+│           │            │  │  + NAS  │ │  + NAS  │        │ │
+│  ┌────────▼─────────┐  │  │  + EIP  │ │  + EIP  │        │ │
+│  │   ALB Ingress    │  │  └─────────┘ └─────────┘        │ │
+│  └────────┬─────────┘  └──────────────────────────────────┘ │
+│           │                                                 │
+│           │            ┌──────────────────────────────────┐ │
+│           │            │         OpenClaw Pod            │ │
+│           │            │  (Web UI + AI 编程助手)         │ │
+│           │            └──────────────────────────────────┘ │
+└───────────┼─────────────────────────────────────────────────┘
+            │
+    ┌───────▼───────┐
+    │  E2B Client   │
+    │ (Python/JS)   │
+    └───────────────┘
+```
+
+## 组件说明
+
+| 组件 | 说明 |
+|------|------|
+| **SandboxSet** | 管理 Sandbox 的工作负载，维护预热池实现秒级启动 |
+| **Sandbox** | 核心 CRD，管理沙箱实例生命周期，支持 Pause/Resume |
+| **sandbox-manager** | 无状态后端组件，提供 E2B 兼容 API |
+| **agent-runtime** | Sidecar 组件，提供代码执行、文件操作等功能 |
+| **ALB Ingress** | 负载均衡入口，处理 HTTPS 请求 |
+| **ImageCache** | 镜像缓存，预先缓存容器镜像加速 Pod 启动 |
+| **NAS** | 文件存储，提供持久化数据存储 |
+
+## 常见问题
+
+### Q: 沙箱启动慢？
+
+**A**: 
+1. 确认已配置镜像缓存（需在 ACS 集群层面申请白名单，详见「配置镜像缓存加速」章节）
+2. 增加 SandboxSet 预热副本数：`kubectl edit sandboxset openclaw`
+3. 如果 Pod 报 403 错误，说明镜像缓存白名单未开通
+
+### Q: 如何查看沙箱状态？
+
+```bash
+kubectl get sandbox -A      # 查看所有沙箱
+kubectl get sandboxset -A   # 查看所有 SandboxSet
+kubectl describe sandbox <name>  # 查看沙箱详情
+```
+
+### Q: 休眠/唤醒失败？
+
+**A**: 确保：
+1. 使用阿里云 ACS 集群
+2. 已联系阿里云开启休眠/唤醒功能白名单
+3. agent-runtime 组件正常运行
+
+### Q: Pod EIP 分配失败？
+
+**A**: 检查：
+1. 确认已安装 `ack-extend-network-controller` 组件
+2. 检查组件日志：`kubectl logs -n kube-system -l app=ack-extend-network-controller`
+3. 确认账户有 EIP 配额：登录 VPC 控制台查看
+
+## 最佳实践
+
+### 资源规划
+
+| 场景 | CPU | 内存 | 预热副本 |
+|-----|-----|------|---------|
+| 测试环境 | 2 核 | 4Gi | 1 个 |
+| 生产环境 | 4 核 | 8Gi | 3-5 个 |
+| 高并发 | 8 核 | 16Gi | 10+ 个 |
+
+### 成本优化
+
+- 合理配置预热副本数，避免资源浪费
+- 使用休眠功能暂停不活跃的沙箱
+- 配置 NAS 生命周期策略，自动清理过期数据
+
+### 安全加固
+
+- 定期更新 TLS 证书
+- 使用强密码作为 Gateway Token
+- 配置安全组白名单，限制访问来源
+
+## 相关链接
+
+- [OpenKruise Agents 文档](https://openkruise.io/zh/kruiseagents)
+- [E2B SDK 文档](https://e2b.dev/docs)
+- [阿里云 ACS 文档](https://help.aliyun.com/product/85222.html)
+- [百炼大模型服务平台](https://bailian.console.aliyun.com/)
+
+## 技术支持
+
+- **钉钉交流群**：在计算巢服务页面可找到钉钉群二维码
+- **工单系统**：[提交工单](https://workorder.console.aliyun.com/)
