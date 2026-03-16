@@ -995,6 +995,46 @@ Resources:
                     Fn::GetAtt:
                       - ClusterUserKubeconfig
                       - Config
+  # ========== 测试 Pod（所有资源就绪后运行） ==========
+  TestPod:
+    Type: ALIYUN::CS::ClusterApplication
+    DependsOn:
+      - OpenClawSandboxSet
+    Properties:
+      ClusterId:
+        Fn::GetAtt:
+          - AckOrAcsCluster
+          - ClusterId
+      YamlContent:
+        Fn::Sub:
+          - |
+            apiVersion: v1
+            kind: Pod
+            metadata:
+              name: acs-sandbox-test-pod
+              namespace: default
+              labels:
+                app: acs-sandbox-test-pod
+            spec:
+              containers:
+                - name: acs-sandbox-test-pod
+                  image: compute-nest-registry.cn-hangzhou.cr.aliyuncs.com/computenest/acs-sandbox-test-pod:latest
+                  imagePullPolicy: Always
+                  env:
+                    - name: E2B_API_KEY
+                      value: ${AdminApiKey}
+                    - name: E2B_DOMAIN
+                      value: ${E2BDomainAddress}
+                    - name: SSL_CERT_FILE
+                      value: "${TLSCert}"
+              restartPolicy: Never
+          - AdminApiKey:
+              Ref: AdminApiKey
+            E2BDomainAddress:
+              Ref: E2BDomainAddress
+            TLSCert:
+              Ref: TLSCert
+
   # ========== PrivateZone（Sandbox 就绪后配置内网域名解析 + CNAME） ==========
   PrivateZone:
     Condition: CreatePrivateZoneCondition

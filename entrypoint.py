@@ -14,8 +14,47 @@ import sys
 
 
 # 证书内容（PEM 格式字符串）从环境变量读取，写入此路径
-CERT_CONTENT = os.environ.get("SSL_CERT_FILE", "")
+# 注意：K8s YAML >- 折叠块会把换行变成空格，需要在写入前还原 PEM 换行格式
+_ssl_cert_raw = os.environ.get("SSL_CERT_FILE", "")
+CERT_CONTENT = _ssl_cert_raw
 CERT_OUTPUT_PATH = "./ca-fullchain.pem"
+
+
+def restore_pem_newlines(pem_content: str) -> str:
+    """还原被 YAML >- 折叠块压平的 PEM 换行格式。
+
+    YAML >- 会把多行内容的换行符替换成空格，导致 PEM 格式损坏：
+      -----BEGIN CERTIFICATE----- MIID5j... -----END CERTIFICATE-----
+    需要还原为标准 PEM 格式（每行 64 字符的 base64 + 首尾标记各占一行）。
+    """
+    import re
+
+    # 先把多余空格归一化（连续空格变单空格，去掉首尾空白）
+    content = " ".join(pem_content.split())
+
+    # 把 "-----END ... ----- -----BEGIN" 之间的空格替换为换行，分割多个证书
+    content = re.sub(r"(-----END [^-]+-----)\s+(-----BEGIN)", r"\1\n\2", content)
+
+    result_parts = []
+    # 逐个处理每段 PEM（BEGIN ... END）
+    for match in re.finditer(r"(-----BEGIN [^-]+-----)(.*?)(-----END [^-]+-----)", content, re.DOTALL):
+        header = match.group(1).strip()
+        body = match.group(2).strip()
+        footer = match.group(3).strip()
+
+        # body 里可能还有空格（原来的行内空格），去掉所有空格得到连续 base64
+        body_clean = body.replace(" ", "")
+
+        # 按 64 字符分行
+        body_lines = [body_clean[i:i + 64] for i in range(0, len(body_clean), 64)]
+
+        result_parts.append(header + "\n" + "\n".join(body_lines) + "\n" + footer)
+
+    if result_parts:
+        return "\n".join(result_parts) + "\n"
+
+    # 如果没有匹配到 PEM 结构，原样返回（可能本来就是正常格式）
+    return pem_content
 
 # 主进程启动命令（通过环境变量或命令行参数传入）
 MAIN_COMMAND = os.environ.get("MAIN_COMMAND", "")
@@ -25,7 +64,10 @@ ENV_FILE_OUTPUT_PATH = os.environ.get("ENV_FILE_OUTPUT_PATH", "./.env")
 
 
 def write_cert_files():
-    """从环境变量 SSL_CERT_FILE 读取公钥证书内容，写入 ca-fullchain.pem"""
+    """从环境变量 SSL_CERT_FILE 读取公钥证书内容，写入 ca-fullchain.pem。
+    写入完成后将 SSL_CERT_FILE 环境变量更新为文件路径，
+    确保 httpx/ssl 等库读取到的是合法的文件路径而非证书内容字符串。
+    """
     if not CERT_CONTENT:
         print("[entrypoint] SSL_CERT_FILE 环境变量未设置，跳过证书写入")
         return
@@ -34,9 +76,15 @@ def write_cert_files():
     if cert_dir:
         os.makedirs(cert_dir, exist_ok=True)
 
+    # 还原被 YAML >- 折叠块压平的 PEM 换行格式，再写入文件
+    restored_cert = restore_pem_newlines(CERT_CONTENT)
     with open(CERT_OUTPUT_PATH, "w") as cert_file:
-        cert_file.write(CERT_CONTENT)
-    print(f"[entrypoint] 证书已写入: {CERT_OUTPUT_PATH}")
+        cert_file.write(restored_cert)
+
+    # 关键：将环境变量从证书内容替换为文件路径
+    # httpx 会直接读取 SSL_CERT_FILE 作为 cafile 路径传给 ssl.create_default_context
+    os.environ["SSL_CERT_FILE"] = os.path.abspath(CERT_OUTPUT_PATH)
+    print(f"[entrypoint] 证书已写入: {CERT_OUTPUT_PATH}，SSL_CERT_FILE 已更新为文件路径")
 
 
 def write_env_file():
