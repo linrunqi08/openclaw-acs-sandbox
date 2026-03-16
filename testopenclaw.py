@@ -64,9 +64,9 @@ def main():
 
     print(f"等待就绪总耗时: {time.monotonic() - start_time:.2f} 秒")
 
-    # 步骤4: 暂停前等待用户确认
-    print("\n[步骤4] 服务已就绪，准备暂停 sandbox...")
-    input("按 Enter 键继续执行 pause 操作...")
+    # 步骤4: 暂停前等待服务完全稳定
+    print("\n[步骤4] 服务已就绪，等待 10 秒让 sandbox 完全稳定后再 pause...")
+    time.sleep(10)
 
     # 步骤5: 暂停 sandbox
     print("\n[步骤5] 执行 sandbox beta_pause...")
@@ -76,7 +76,6 @@ def main():
     print(f"pause success: {pause_success}")  # pause 的结果. None 是预期值，如果有其他错误信息回返回
 
     # 步骤6: 重新连接 sandbox
-    input("[步骤6] 准备重新连接 sandbox 按 Enter 键继续执行 connect 操作...")
     # 等待 10秒让 sandbox 完全暂停
     print("等待 60秒让 sandbox 完全暂停...")
     time.sleep(60)
