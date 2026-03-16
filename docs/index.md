@@ -240,7 +240,7 @@ spec:
 替换xxxx为您前面指定的域名，返回值2xx表示e2b服务已运行,如果是自行签发的证书，需要指定ca-fullchain.pem；或通过配置环境变量使用您本地的证书 【该动作为创建sandbox的动作】e2b使用的可以请自行替换 “admin-987654321"-> 实际的key
 
 ```yaml
-curl --cacert fullchain.pem -X POST --location "https://api.agent-vpc.infra/sandboxes" \
+curl --cacert ca-fullchain.pem -X POST --location "https://api.agent-vpc.infra/sandboxes" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: admin-987654321" \
     -d '{
