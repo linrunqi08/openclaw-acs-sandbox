@@ -7,27 +7,98 @@ Conditions:
     Fn::Equals:
       - NewVPC
       - Ref: VpcOption
+  CreatePrivateZoneCondition:
+    Fn::Equals:
+      - true
+      - Ref: EnablePrivateZone
 Parameters:
   ZoneId1:
     Type: String
     AssociationProperty: ALIYUN::ECS::Instance:ZoneId
+    Default: null
+    Required: true
+    AllowedValues:
+      - cn-hangzhou-b
+      - cn-hangzhou-g
+      - cn-hangzhou-h
+      - cn-hangzhou-i
+      - cn-hangzhou-j
+      - cn-hangzhou-k
+      - cn-beijing-f
+      - cn-beijing-g
+      - cn-beijing-h
+      - cn-beijing-i
+      - cn-beijing-j
+      - cn-beijing-k
+      - cn-beijing-l
+      - cn-shanghai-b
+      - cn-shanghai-d
+      - cn-shanghai-e
+      - cn-shanghai-f
+      - cn-shanghai-g
+      - cn-shanghai-l
+      - cn-shanghai-m
+      - cn-shanghai-n
+      - cn-hongkong-b
+      - cn-hongkong-c
+      - cn-hongkong-d
+      - ap-southeast-1a
+      - ap-southeast-1b
+      - ap-southeast-1c
+      - ap-southeast-1d
+      - us-east-1a
+      - us-east-1b
     AssociationPropertyMetadata:
       ExclusiveTo:
         - ZoneId2
+
+
     Label:
       en: Zone ID 1
       zh-cn: 可用区1
-    Required: true
   ZoneId2:
     Type: String
     AssociationProperty: ALIYUN::ECS::Instance:ZoneId
+    Default: null
+    Required: true
+    AllowedValues:
+      - cn-hangzhou-b
+      - cn-hangzhou-g
+      - cn-hangzhou-h
+      - cn-hangzhou-i
+      - cn-hangzhou-j
+      - cn-hangzhou-k
+      - cn-beijing-f
+      - cn-beijing-g
+      - cn-beijing-h
+      - cn-beijing-i
+      - cn-beijing-j
+      - cn-beijing-k
+      - cn-beijing-l
+      - cn-shanghai-b
+      - cn-shanghai-d
+      - cn-shanghai-e
+      - cn-shanghai-f
+      - cn-shanghai-g
+      - cn-shanghai-l
+      - cn-shanghai-m
+      - cn-shanghai-n
+      - cn-hongkong-b
+      - cn-hongkong-c
+      - cn-hongkong-d
+      - ap-southeast-1a
+      - ap-southeast-1b
+      - ap-southeast-1c
+      - ap-southeast-1d
+      - us-east-1a
+      - us-east-1b
     AssociationPropertyMetadata:
       ExclusiveTo:
         - ZoneId1
+
     Label:
       en: Zone ID 2
-      zh-cn: 可用区 2
-    Required: true
+      zh-cn: 可用区2
   VpcOption:
     Type: String
     AllowedValues:
@@ -191,7 +262,7 @@ Parameters:
       ClusterType: ManagedKubernetes
       NodeCidrMask: 26
       Addons:
-        - name: flannel
+        - name: terway
     Default: 172.16.0.0/16
   InstanceType:
     Type: CommaDelimitedList
@@ -353,6 +424,15 @@ Parameters:
       zh-cn: 请输入有效的域名
     AllowedPattern: ^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.[A-Za-z]{2,})+$
     Default: agent-vpc.infra
+  EnablePrivateZone:
+    Type: Boolean
+    Label:
+      zh-cn: 是否配置内网域名解析
+      en: Enable internal network domain name resolution
+    Description:
+      zh-cn: 若需要内网访问，需要通过PrivateZone配置内网域名解析。打开此配置会自动创建PrivateZone，并设置内网权威域名的生效范围为所选的VPC。
+      en: If internal network access is required, configure internal domain name resolution through PrivateZone. This will create a PrivateZone and set the effective range to the selected VPC.
+    Default: true
   TLSCert:
     Type: String
     Label:
@@ -420,7 +500,7 @@ Parameters:
     Label:
       zh-cn: 百炼 API-KEY
       en: BaiLian API-KEY
-    AssociationProperty: ALIYUN::Bailian::ApiKey::ApiKeyInfo
+    Default: sk-xxx
   OpenClawGatewayToken:
     Type: String
     Label:
@@ -508,32 +588,6 @@ Resources:
         Ref: VSwitchId1
       VpcOption:
         Ref: VpcOption
-  # ========== PrivateZone（新建VPC时自动创建） ==========
-  # 创建 PrivateZone 使 E2B 域名在 VPC 内部可解析
-  PrivateZone:
-    Condition: CreateNewVpcCondition
-    Type: ALIYUN::PVTZ::Zone
-    Properties:
-      ProxyPattern: ZONE
-      ZoneName:
-        Ref: E2BDomainAddress
-    DependsOn: VpcModule
-  # 将 PrivateZone 绑定到 VPC
-  PrivateZoneVpcBinder:
-    Condition: CreateNewVpcCondition
-    Type: ALIYUN::PVTZ::ZoneVpcBinder
-    Properties:
-      Vpcs:
-        - RegionId:
-            Ref: ALIYUN::Region
-          VpcId:
-            Fn::GetAtt:
-              - VpcModule
-              - VpcId
-      ZoneId:
-        Fn::GetAtt:
-          - PrivateZone
-          - ZoneId
   Sleep:
     Type: ALIYUN::ROS::Sleep
     DependsOn:
@@ -625,7 +679,23 @@ Resources:
     Type: ALIYUN::ROS::Sleep
     DependsOn: AlbIngressAddon
     Properties:
-      CreateDuration: 60
+      CreateDuration: 180
+  # ========== 查询 ALB 实例（通过集群标签） ==========
+  AlbDataSource:
+    Type: DATASOURCE::ALB::LoadBalancers
+    DependsOn: AddonSleep
+    Properties:
+      AddressType: Internet
+      VpcIds:
+        - Fn::GetAtt:
+            - VpcModule
+            - VpcId
+      Tags:
+        - Key: ack.aliyun.com
+          Value:
+            Fn::GetAtt:
+              - AckOrAcsCluster
+              - ClusterId
   # Step 3: Sandbox Controller
   SandboxControllerAddon:
     Type: ALIYUN::CS::ClusterAddons
@@ -727,6 +797,8 @@ Resources:
               labels:
                 app: openclaw
             spec:
+              persistentContents:
+                - filesystem
               replicas: ${OpenClawReplicas}
               template:
                 metadata:
@@ -734,13 +806,15 @@ Resources:
                     alibabacloud.com/acs: "true"
                     app: openclaw
                   annotations:
-                    network.alibabacloud.com/pod-with-eip: "true"
-                    network.alibabacloud.com/eip-bandwidth: "5"
+                    ops.alibabacloud.com/pause-enabled: "true"
                 spec:
+                  restartPolicy: Always
+                  automountServiceAccountToken: false
+                  enableServiceLinks: false
                   initContainers:
                     - name: init
                       image: "${InitImage}"
-                      imagePullPolicy: Always
+                      imagePullPolicy: IfNotPresent
                       command: [ "sh", "/workspace/entrypoint_inner.sh" ]
                       volumeMounts:
                         - name: envd-volume
@@ -754,23 +828,19 @@ Resources:
                   containers:
                     - name: openclaw
                       image: "${OpenClawImage}"         
-                      imagePullPolicy: Always
+                      imagePullPolicy: IfNotPresent
                       securityContext:
                         readOnlyRootFilesystem: false
-                        runAsUser: 0
                         runAsGroup: 0
+                        runAsUser: 0
                       resources:
                         requests:
-                          cpu: 4
-                          memory: 8Gi
+                          cpu: 2
+                          memory: 4Gi
                         limits:
-                          cpu: 4
-                          memory: 8Gi
+                          cpu: 2
+                          memory: 4Gi
                       env:
-                        - name: POD_NAME
-                          valueFrom:
-                            fieldRef:
-                              fieldPath: metadata.name
                         - name: ENVD_DIR
                           value: /mnt/envd
                         - name: DASHSCOPE_API_KEY 
@@ -793,6 +863,7 @@ Resources:
                             - /bin/bash
                             - -c
                             - /mnt/envd/envd-run.sh
+                  terminationGracePeriodSeconds: 30
                   volumes:
                   - emptyDir: {}
                     name: envd-volume
@@ -806,10 +877,7 @@ Resources:
                 - RegionId:
                     Ref: ALIYUN::Region
             BaiLianApiKey:
-              Fn::Jq:
-                - First
-                - .ApiKeyValue
-                - Fn::Sub: '${BaiLianApiKey}'
+              Ref: BaiLianApiKey
             OpenClawGatewayToken:
               Ref: OpenClawGatewayToken
       WaitUntil:
@@ -826,31 +894,6 @@ Resources:
           Operator: NotEmpty
           Timeout: 300
           FirstMatch: true
-  # 部署 ClusterIP Service（内网访问，需用户自行配置公网入口）
-  OpenClawService:
-    Type: ALIYUN::CS::ClusterApplication
-    DependsOn: OpenClawSandboxSet
-    Properties:
-      DefaultNamespace: default
-      ClusterId:
-        Fn::GetAtt:
-          - AckOrAcsCluster
-          - ClusterId
-      YamlContent: |
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: openclaw-svc
-          namespace: default
-        spec:
-          type: ClusterIP
-          selector:
-            app: openclaw
-          ports:
-            - name: http
-              port: 18789
-              targetPort: 18789
-              protocol: TCP
   # ========== ALB Config Job（配置 HTTPS 443 监听器） ==========
   EditAlbConfigServiceAccount:
     Type: ALIYUN::CS::ClusterApplication
@@ -952,9 +995,62 @@ Resources:
                     Fn::GetAtt:
                       - ClusterUserKubeconfig
                       - Config
+  # ========== PrivateZone（Sandbox 就绪后配置内网域名解析 + CNAME） ==========
+  PrivateZone:
+    Condition: CreatePrivateZoneCondition
+    Type: ALIYUN::PVTZ::Zone
+    DependsOn: OpenClawSandboxSet
+    Properties:
+      ProxyPattern: ZONE
+      ZoneName:
+        Ref: E2BDomainAddress
+  PrivateZoneVpcBinder:
+    Condition: CreatePrivateZoneCondition
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    Properties:
+      Vpcs:
+        - RegionId:
+            Ref: ALIYUN::Region
+          VpcId:
+            Fn::GetAtt:
+              - VpcModule
+              - VpcId
+      ZoneId:
+        Fn::GetAtt:
+          - PrivateZone
+          - ZoneId
+  PrivateZoneCnameRecord:
+    Condition: CreatePrivateZoneCondition
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn:
+      - PrivateZoneVpcBinder
+      - AlbDataSource
+    Properties:
+      ZoneId:
+        Fn::GetAtt:
+          - PrivateZone
+          - ZoneId
+      Rr: "*"
+      Type: CNAME
+      Value:
+        Fn::Jq:
+          - First
+          - '.[0].DNSName'
+          - Fn::GetAtt:
+              - AlbDataSource
+              - LoadBalancers
 Outputs:
-  Introduction:
-    Value: 到ACS控制台查看sandbox-manager的网关，获取ALB的访问端点，格式为alb-xxx, 自行配置到域名的DNS解析    
+  ALB_DNS_Name:
+    Label:
+      zh-cn: ALB 访问端点
+      en: ALB DNS Name
+    Value:
+      Fn::Jq:
+        - First
+        - '.[0].DNSName'
+        - Fn::GetAtt:
+            - AlbDataSource
+            - LoadBalancers
   ACS控制台地址:
     Value:
       Fn::Sub:
@@ -992,6 +1088,19 @@ Metadata:
       - OpenClawReplicas
     ParameterGroups:
       - Parameters:
+          - ZoneId1
+          - ZoneId2
+          - VpcOption
+          - VpcId
+          - VSwitchId1
+          - VSwitchId2
+          - VpcCidrBlock
+          - VSwitchCidrBlock1
+          - VSwitchCidrBlock2
+        Label:
+          en: Basic Configuration
+          zh-cn: 基础配置
+      - Parameters:
           - ClusterOption
           - InstanceType
           - WorkerSystemDiskCategory
@@ -1007,22 +1116,10 @@ Metadata:
           en: Cluster Configuration
           zh-cn: 集群 配置
       - Parameters:
-          - ZoneId1
-          - ZoneId2
-          - VpcOption
-          - VpcId
-          - VSwitchId1
-          - VSwitchId2
-          - VpcCidrBlock
-          - VSwitchCidrBlock1
-          - VSwitchCidrBlock2
-        Label:
-          en: Basic Configuration
-          zh-cn: 基础配置
-      - Parameters:
           - E2BDomainAddress
           - TLSCert
           - TLSSecret
+          - EnablePrivateZone
           - AdminApiKey
           - SandboxManagerCpu
           - SandboxManagerMemory
@@ -1034,4 +1131,4 @@ Metadata:
           - OpenClawGatewayToken
         Label:
           en: OpenClaw Configuration
-          zh-cn: OpenClaw 配置
+          zh-cn: OpenClaw 默认配置
