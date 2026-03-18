@@ -225,6 +225,83 @@ spec:
 3. 执行 python testopenclaw.py
 4. 等待脚本验证所有功能通过
 
+## 访问 OpenClaw Web UI
+
+部署完成后，可以通过浏览器直接访问 OpenClaw 沙箱的 Web 控制台。
+
+### 域名格式说明
+
+OpenClaw 沙箱通过 PrivateZone 泛域名解析 + ALB 路由实现访问，域名格式为：
+
+```
+<port>-<namespace>--<pod-name>.<e2b-domain>?token=<gateway-token>
+                 ↑↑
+              双连字符（重要！）
+```
+
+**参数说明：**
+- `port`: OpenClaw Web UI 端口，固定为 `18789`
+- `namespace`: Pod 所在命名空间，默认为 `default`
+- `pod-name`: Sandbox Pod 名称，如 `openclaw-abc12`
+- `e2b-domain`: 部署时配置的 E2B 域名，如 `agent-vpc.infra`
+- `gateway-token`: SandboxSet 中配置的 `GATEWAY_TOKEN` 环境变量值
+
+**示例 URL：**
+```
+https://18789-default--openclaw-abc12.agent-vpc.infra?token=clawdbot-mode-123456
+```
+
+> ⚠️ **注意**：namespace 和 pod-name 之间必须使用**双连字符 `--`**，这是 PrivateZone 域名解析的规范格式。使用单连字符会导致 502 错误。
+
+### 获取 Sandbox Pod 名称
+
+通过以下命令获取可用的 OpenClaw Sandbox Pod，或直接在控制台查看：
+
+```bash
+kubectl get pods -n default -l app=openclaw
+```
+
+输出示例：
+```
+NAME             READY   STATUS    RESTARTS   AGE
+openclaw-abc12   2/2     Running   0          10m
+openclaw-def34   2/2     Running   0          15m
+```
+
+### 本地访问配置
+
+由于 PrivateZone 域名只在 VPC 内生效，本地访问需要配置 hosts 文件：
+
+**步骤 1：获取 ALB 公网 IP**
+
+在 testpod 执行 `dig ${alb_domain}`，其中 `alb_domain` 可在计算巢服务实例界面处看到：
+
+![ALB 域名查看](img_12.png)
+
+![dig 命令结果](img_13.png)
+
+**步骤 2：配置 hosts 文件**
+
+将 ALB 公网 IP 和沙箱域名添加到 `/etc/hosts`：
+
+```bash
+# macOS/Linux
+sudo vim /etc/hosts
+
+# 添加以下内容（替换为实际的 ALB IP 和 Pod 名称）
+39.103.89.43 18789-default--openclaw-abc12.agent-vpc.infra
+39.103.89.43 18789-default--openclaw-def34.agent-vpc.infra
+```
+
+**步骤 3：浏览器访问**
+
+在浏览器中打开（需要接受自签名证书警告）：
+
+```
+https://18789-default--openclaw-abc12.agent-vpc.infra?token=clawdbot-mode-123456
+```
+
+![img_14.png](img_14.png)
 
 ## 手动测试 (可选)
 ### 配置域名的解析

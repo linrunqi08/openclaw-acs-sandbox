@@ -326,7 +326,6 @@ Parameters:
       en: Service CIDR
     AssociationProperty: ALIYUN::CS::ManagedKubernetesCluster::ServiceCidr
     AssociationPropertyMetadata:
-      ContainerCidr: 172.20.0.0/20
       VpcId: ${VpcId}
       RegionId: ${RegionId}
       ClusterType: ManagedKubernetes
@@ -798,10 +797,30 @@ Resources:
             Fn::GetAtt:
               - AckOrAcsCluster
               - ClusterId
-  # Step 3: Sandbox Controller
-  SandboxControllerAddon:
+  # Step 3: ARMS Prometheus（Sandbox Manager 依赖）
+  ArmsPrometheusAddon:
     Type: ALIYUN::CS::ClusterAddons
     DependsOn: AlbIngressSleep
+    Properties:
+      ClusterId:
+        Fn::GetAtt:
+          - AckOrAcsCluster
+          - ClusterId
+      InstalledIgnore: true
+      Addons:
+        - Name: arms-prometheus
+          Version: ''
+          Config: '{"controller":{"nodeExporter":{"hostProcFsMount":{"enabled":true},"hostSysFsMount":{"enabled":true},"hostRootFsMount":{"enabled":true}}}}'
+  # 等待 ARMS Prometheus 就绪
+  ArmsPrometheusSleep:
+    Type: ALIYUN::ROS::Sleep
+    DependsOn: ArmsPrometheusAddon
+    Properties:
+      CreateDuration: 60
+  # Step 4: Sandbox Controller
+  SandboxControllerAddon:
+    Type: ALIYUN::CS::ClusterAddons
+    DependsOn: ArmsPrometheusSleep
     Properties:
       ClusterId:
         Fn::GetAtt:
