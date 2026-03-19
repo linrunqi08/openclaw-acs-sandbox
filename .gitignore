@@ -26,6 +26,8 @@ test-*.yaml
 template_*.yaml
 sandboxset-*.yaml
 openclaw-*.yaml
+oneday-cli/
+computenest/
 
 # Other docs (keep docs/ only)
 *.md
