@@ -60,6 +60,11 @@ class NetworkValidator:
         self.stack_params: Dict[str, str] = {}
         self.vpc_primary_cidr: str = ""
         self.vpc_secondary_cidrs: List[str] = []
+        self.cluster_mode: str = ""  # "ack" or "acs", auto-detected
+
+    @property
+    def sandbox_namespace(self) -> str:
+        return self.stack_params.get("SandboxNamespace", "default")
 
     def run_cmd(self, cmd: str, timeout: int = 30) -> Tuple[int, str, str]:
         try:
@@ -145,6 +150,23 @@ class NetworkValidator:
 
             except (json.JSONDecodeError, KeyError) as e:
                 self.add_result("StackInfo", "解析 Stack", False, f"解析错误: {e}")
+
+    # ==================== Auto-detect cluster mode ====================
+    def _detect_cluster_mode(self):
+        """Detect ACK (with node pools) vs ACS (pure virtual-kubelet) based on node types."""
+        rc, out, _ = self.kubectl("get nodes -o jsonpath='{.items[*].metadata.name}'")
+        if rc != 0:
+            self.cluster_mode = "acs"
+            return
+        nodes = out.strip("'").split()
+        real_nodes = [n for n in nodes if "virtual-kubelet" not in n]
+        self.cluster_mode = "ack" if real_nodes else "acs"
+        print(f"  集群模式: {self.cluster_mode.upper()} "
+              f"({'有实体节点 + virtual-kubelet' if self.cluster_mode == 'ack' else '纯 virtual-kubelet'})")
+
+    @property
+    def is_ack(self) -> bool:
+        return self.cluster_mode == "ack"
 
     # ==================== 1. kubectl connectivity ====================
     def test_kubectl_connectivity(self):
@@ -261,9 +283,15 @@ class NetworkValidator:
         try:
             sg = json.loads(out)
             sg_type = sg.get("SecurityGroupType", "normal")
-            self.add_result("SecurityGroup", "安全组类型",
-                            sg_type in ("enterprise", "normal", None, ""),
-                            f"类型: {sg_type or 'normal'} (推荐 enterprise 以支持精细控制)")
+
+            if self.is_ack and sg_type == "normal":
+                self.add_result("SecurityGroup", "安全组类型", True,
+                                f"类型: normal (ACK 模式, 隐式放通全部出方向)")
+            else:
+                self.add_result("SecurityGroup", "安全组类型",
+                                sg_type in ("enterprise", "normal", None, ""),
+                                f"类型: {sg_type or 'normal'}"
+                                + (" (推荐 enterprise 以支持精细出方向控制)" if sg_type == "normal" else ""))
 
             permissions = sg.get("Permissions", {}).get("Permission", [])
             ingress = [p for p in permissions if p.get("Direction") == "ingress"]
@@ -271,8 +299,6 @@ class NetworkValidator:
 
             self.add_result("SecurityGroup", "入方向规则", len(ingress) >= 3,
                             f"{len(ingress)} 条入方向规则")
-            self.add_result("SecurityGroup", "出方向规则", len(egress) >= 5,
-                            f"{len(egress)} 条出方向规则")
 
             # Check ingress: business VSwitch CIDRs should be allowed
             ingress_cidrs = [p.get("SourceCidrIp", "") for p in ingress if p.get("Policy") != "Drop"]
@@ -281,112 +307,121 @@ class NetworkValidator:
             self.add_result("SecurityGroup", "入方向放行业务 VSwitch", biz_cidrs_allowed,
                             f"允许的源 CIDR: {ingress_cidrs}")
 
-            # Check egress: metadata deny
-            metadata_deny = any(
-                p.get("DestCidrIp") == "100.100.100.200/32" and p.get("Policy") == "Drop"
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向拒绝 metadata", metadata_deny,
-                            "100.100.100.200/32 已拒绝" if metadata_deny else "缺失 metadata 拒绝",
-                            severity="P0")
+            if self.is_ack and sg_type == "normal":
+                # ACK normal SG: egress is implicitly allow-all, no explicit rules needed
+                self.add_result("SecurityGroup", "出方向规则 (ACK normal)", True,
+                                f"normal 安全组隐式放通全部出方向 (无需显式规则, 实际隔离由连通性测试覆盖)")
+            else:
+                # ACS enterprise SG: require explicit egress rules
+                self.add_result("SecurityGroup", "出方向规则", len(egress) >= 5,
+                                f"{len(egress)} 条出方向规则")
 
-            # Check egress: VPC CIDR deny (dynamic - matches actual VPC CIDR)
-            vpc_cidr = self.vpc_primary_cidr or "192.168.0.0/16"
-            vpc_deny = any(
-                p.get("DestCidrIp") == vpc_cidr and p.get("Policy") == "Drop"
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向拒绝 VPC 主网段", vpc_deny,
-                            f"{vpc_cidr} 已拒绝" if vpc_deny
-                            else f"缺失 VPC CIDR 拒绝 (预期 {vpc_cidr})",
-                            severity="P0")
+                # Check egress: metadata deny
+                metadata_deny = any(
+                    p.get("DestCidrIp") == "100.100.100.200/32" and p.get("Policy") == "Drop"
+                    for p in egress
+                )
+                self.add_result("SecurityGroup", "出方向拒绝 metadata", metadata_deny,
+                                "100.100.100.200/32 已拒绝" if metadata_deny else "缺失 metadata 拒绝",
+                                severity="P0")
 
-            # Check egress: OpenClaw CIDR deny
-            openclaw_cidr = self.stack_params.get("OpenClawCidrBlock", "10.8.0.0/16")
-            oc_deny = any(
-                p.get("DestCidrIp") == openclaw_cidr and p.get("Policy") == "Drop"
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向拒绝 OpenClaw 网段", oc_deny,
-                            f"{openclaw_cidr} 已拒绝" if oc_deny
-                            else f"缺失 OpenClaw CIDR 拒绝 (预期 {openclaw_cidr})",
-                            severity="P0")
+                # Check egress: VPC CIDR deny
+                vpc_cidr = self.vpc_primary_cidr or "192.168.0.0/16"
+                vpc_deny = any(
+                    p.get("DestCidrIp") == vpc_cidr and p.get("Policy") == "Drop"
+                    for p in egress
+                )
+                self.add_result("SecurityGroup", "出方向拒绝 VPC 主网段", vpc_deny,
+                                f"{vpc_cidr} 已拒绝" if vpc_deny
+                                else f"缺失 VPC CIDR 拒绝 (预期 {vpc_cidr})",
+                                severity="P0")
 
-            # Check egress: DNS to VPC CIDR allowed (CoreDNS in business VSwitch)
-            dns_vpc_allow = any(
-                p.get("DestCidrIp") == vpc_cidr
-                and p.get("Policy") != "Drop"
-                and "53" in p.get("PortRange", "")
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向放行 DNS 到 VPC",
-                            dns_vpc_allow,
-                            f"DNS 53 to {vpc_cidr} 已放行" if dns_vpc_allow
-                            else f"缺失 DNS 放行 {vpc_cidr} (CoreDNS 在业务 VSwitch)",
-                            severity="P0")
+                # Check egress: OpenClaw CIDR deny
+                openclaw_cidr = self.stack_params.get("OpenClawCidrBlock", "10.8.0.0/16")
+                oc_deny = any(
+                    p.get("DestCidrIp") == openclaw_cidr and p.get("Policy") == "Drop"
+                    for p in egress
+                )
+                self.add_result("SecurityGroup", "出方向拒绝 OpenClaw 网段", oc_deny,
+                                f"{openclaw_cidr} 已拒绝" if oc_deny
+                                else f"缺失 OpenClaw CIDR 拒绝 (预期 {openclaw_cidr})",
+                                severity="P0")
 
-            # Check egress: upstream NAT gateway IP allowed
-            default_nat_ip = self.stack_outputs.get("DefaultNatGatewayIp", "")
-            if default_nat_ip:
-                nat_allowed = any(
-                    p.get("DestCidrIp") == f"{default_nat_ip}/32"
+                # Check egress: DNS to VPC CIDR allowed
+                dns_vpc_allow = any(
+                    p.get("DestCidrIp") == vpc_cidr
+                    and p.get("Policy") != "Drop"
+                    and "53" in p.get("PortRange", "")
+                    for p in egress
+                )
+                self.add_result("SecurityGroup", "出方向放行 DNS 到 VPC",
+                                dns_vpc_allow,
+                                f"DNS 53 to {vpc_cidr} 已放行" if dns_vpc_allow
+                                else f"缺失 DNS 放行 {vpc_cidr} (CoreDNS 在业务 VSwitch)",
+                                severity="P0")
+
+                # Check egress: upstream NAT gateway IP allowed
+                default_nat_ip = self.stack_outputs.get("DefaultNatGatewayIp", "")
+                if default_nat_ip:
+                    nat_allowed = any(
+                        p.get("DestCidrIp") == f"{default_nat_ip}/32"
+                        and p.get("Policy") != "Drop"
+                        for p in egress
+                    )
+                    self.add_result("SecurityGroup", "出方向放行上游 NAT",
+                                    nat_allowed,
+                                    f"NAT IP {default_nat_ip}/32 已放行" if nat_allowed
+                                    else f"缺失上游 NAT 放行 {default_nat_ip}")
+
+                # Check egress: API server IP allowed
+                apiserver_ip = self.stack_outputs.get("ApiServerIntranetIp", "")
+                if apiserver_ip:
+                    api_allowed = any(
+                        p.get("DestCidrIp") == f"{apiserver_ip}/32"
+                        and p.get("Policy") != "Drop"
+                        and "6443" in p.get("PortRange", "")
+                        for p in egress
+                    )
+                    self.add_result("SecurityGroup", "出方向放行 API Server",
+                                    api_allowed,
+                                    f"API Server {apiserver_ip}:6443 已放行" if api_allowed
+                                    else f"缺失 API Server 放行 {apiserver_ip}")
+
+                # Check egress: Alibaba Cloud DNS allowed
+                dns_136 = any(
+                    p.get("DestCidrIp") == "100.100.2.136/32"
+                    and p.get("Policy") != "Drop"
+                    and "53" in p.get("PortRange", "")
+                    for p in egress
+                )
+                dns_138 = any(
+                    p.get("DestCidrIp") == "100.100.2.138/32"
+                    and p.get("Policy") != "Drop"
+                    and "53" in p.get("PortRange", "")
+                    for p in egress
+                )
+                self.add_result("SecurityGroup", "出方向放行阿里云 DNS",
+                                dns_136 and dns_138,
+                                f"100.100.2.136: {'正常' if dns_136 else '缺失'}, "
+                                f"100.100.2.138: {'正常' if dns_138 else '缺失'}")
+
+                # Check egress: public internet allowed (low priority)
+                public_allow = any(
+                    p.get("DestCidrIp") == "0.0.0.0/0"
                     and p.get("Policy") != "Drop"
                     for p in egress
                 )
-                self.add_result("SecurityGroup", "出方向放行上游 NAT",
-                                nat_allowed,
-                                f"NAT IP {default_nat_ip}/32 已放行" if nat_allowed
-                                else f"缺失上游 NAT 放行 {default_nat_ip}")
+                self.add_result("SecurityGroup", "出方向放行公网 (低优先级)",
+                                public_allow,
+                                "0.0.0.0/0 已放行" if public_allow else "缺失公网放行")
 
-            # Check egress: API server IP allowed
-            apiserver_ip = self.stack_outputs.get("ApiServerIntranetIp", "")
-            if apiserver_ip:
-                api_allowed = any(
-                    p.get("DestCidrIp") == f"{apiserver_ip}/32"
-                    and p.get("Policy") != "Drop"
-                    and "6443" in p.get("PortRange", "")
-                    for p in egress
-                )
-                self.add_result("SecurityGroup", "出方向放行 API Server",
-                                api_allowed,
-                                f"API Server {apiserver_ip}:6443 已放行" if api_allowed
-                                else f"缺失 API Server 放行 {apiserver_ip}")
-
-            # Check egress: Alibaba Cloud DNS allowed
-            dns_136 = any(
-                p.get("DestCidrIp") == "100.100.2.136/32"
-                and p.get("Policy") != "Drop"
-                and "53" in p.get("PortRange", "")
-                for p in egress
-            )
-            dns_138 = any(
-                p.get("DestCidrIp") == "100.100.2.138/32"
-                and p.get("Policy") != "Drop"
-                and "53" in p.get("PortRange", "")
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向放行阿里云 DNS",
-                            dns_136 and dns_138,
-                            f"100.100.2.136: {'正常' if dns_136 else '缺失'}, "
-                            f"100.100.2.138: {'正常' if dns_138 else '缺失'}")
-
-            # Check egress: public internet allowed (low priority)
-            public_allow = any(
-                p.get("DestCidrIp") == "0.0.0.0/0"
-                and p.get("Policy") != "Drop"
-                for p in egress
-            )
-            self.add_result("SecurityGroup", "出方向放行公网 (低优先级)",
-                            public_allow,
-                            "0.0.0.0/0 已放行" if public_allow else "缺失公网放行")
-
-            print("\n  --- 出方向规则详情 ---")
-            for p in sorted(egress, key=lambda x: x.get("Priority", 100)):
-                policy = p.get("Policy", "Accept")
-                print(f"    Priority {p.get('Priority'):>3} | "
-                      f"{'DROP' if policy == 'Drop' else 'ALLOW':>5s} | "
-                      f"{p.get('IpProtocol', 'all'):>4s} {p.get('PortRange', '-1/-1'):>10s} -> "
-                      f"{str(p.get('DestCidrIp', 'N/A')):<20s} | {p.get('Description', '')}")
+                print("\n  --- 出方向规则详情 ---")
+                for p in sorted(egress, key=lambda x: x.get("Priority", 100)):
+                    policy = p.get("Policy", "Accept")
+                    print(f"    Priority {p.get('Priority'):>3} | "
+                          f"{'DROP' if policy == 'Drop' else 'ALLOW':>5s} | "
+                          f"{p.get('IpProtocol', 'all'):>4s} {p.get('PortRange', '-1/-1'):>10s} -> "
+                          f"{str(p.get('DestCidrIp', 'N/A')):<20s} | {p.get('Description', '')}")
 
         except (json.JSONDecodeError, KeyError) as e:
             self.add_result("SecurityGroup", "解析安全组", False, f"错误: {e}")
@@ -566,7 +601,7 @@ class NetworkValidator:
         self.add_result("CoreResources", "sandbox-system 命名空间", rc == 0,
                         "存在" if rc == 0 else "不存在")
 
-        rc, out, _ = self.kubectl("get sandboxset openclaw -n default -o jsonpath='{.status.availableReplicas}'")
+        rc, out, _ = self.kubectl(f"get sandboxset openclaw -n {self.sandbox_namespace} -o jsonpath='{{.status.availableReplicas}}'")
         avail = out.strip("'")
         self.add_result("CoreResources", "SandboxSet openclaw", rc == 0 and avail not in ("", "0"),
                         f"可用副本数: {avail}" if avail else "未就绪")
@@ -596,13 +631,82 @@ class NetworkValidator:
         self.add_result("CoreResources", "多可用区节点", len(unique_zones) >= 2,
                         f"检测到可用区: {unique_zones} from nodes: {nodes}")
 
-    # ==================== 6. Sandbox Pod Annotations (ACS-compatible) ====================
+    # ==================== 6. Sandbox Pod Network Assignment ====================
     def test_sandbox_pod_annotations(self):
-        print("\n=== 6. Sandbox Pod 注解 (ACS 兼容) ===")
+        if self.is_ack:
+            print("\n=== 6. Sandbox Pod 网络分配 (ACK PodNetworking) ===")
+            self._test_ack_pod_networking()
+        else:
+            print("\n=== 6. Sandbox Pod 注解 (ACS) ===")
+            self._test_acs_pod_annotations()
 
-        # Check network.alibabacloud.com/security-group-ids (ACS annotation)
+    def _test_ack_pod_networking(self):
+        """ACK: verify PodNetworking CRD assigns correct SG and VSwitches."""
+        rc, out, _ = self.kubectl("get podnetworking -A -o json")
+        if rc != 0:
+            self.add_result("PodNetworking", "PodNetworking CRD", False,
+                            "无法查询 PodNetworking 资源")
+            return
+
+        try:
+            data = json.loads(out)
+            items = data.get("items", [])
+            self.add_result("PodNetworking", "PodNetworking 资源数量", len(items) >= 1,
+                            f"发现 {len(items)} 个 PodNetworking")
+
+            openclaw_pn = None
+            for item in items:
+                name = item.get("metadata", {}).get("name", "")
+                if "openclaw" in name.lower():
+                    openclaw_pn = item
+                    break
+            if not openclaw_pn and items:
+                openclaw_pn = items[0]
+
+            if openclaw_pn:
+                pn_name = openclaw_pn.get("metadata", {}).get("name", "")
+                spec = openclaw_pn.get("spec", {})
+
+                pn_sgs = spec.get("securityGroupIDs", [])
+                sg_ok = self.sg_id in pn_sgs if self.sg_id else len(pn_sgs) > 0
+                self.add_result("PodNetworking", "安全组配置", sg_ok,
+                                f"PodNetworking '{pn_name}' SGs: {pn_sgs}"
+                                + (f" (预期包含 {self.sg_id})" if self.sg_id and not sg_ok else ""),
+                                severity="P0")
+
+                pn_vsws = spec.get("vSwitchOptions", [])
+                self.add_result("PodNetworking", "VSwitch 配置",
+                                len(pn_vsws) >= 3,
+                                f"PodNetworking '{pn_name}' VSwitches: {pn_vsws} ({len(pn_vsws)} 条)",
+                                severity="P0")
+
+                status = openclaw_pn.get("status", {})
+                pn_status = status.get("status", "") or status.get("phase", "")
+                self.add_result("PodNetworking", "PodNetworking 状态",
+                                pn_status == "Ready",
+                                f"Status: {pn_status}" if pn_status else "未就绪")
+        except (json.JSONDecodeError, KeyError) as e:
+            self.add_result("PodNetworking", "PodNetworking 解析", False, f"错误: {e}")
+
+        # ENI actual security group (same check, works for both ACK and ACS)
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw -o jsonpath="
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw -o jsonpath="
+            "'{.items[0].metadata.annotations.network\\.alibabacloud\\.com/security-group-id}'"
+        )
+        actual_sg = out.strip("'")
+        if rc == 0 and actual_sg.startswith("sg-"):
+            self.add_result("PodNetworking", "ENI 实际安全组", True,
+                            f"实际安全组: {actual_sg}")
+            if self.sg_id:
+                self.add_result("PodNetworking", "ENI 安全组匹配 OpenClaw",
+                                actual_sg == self.sg_id,
+                                f"实际: {actual_sg}, 预期: {self.sg_id}",
+                                severity="P0")
+
+    def _test_acs_pod_annotations(self):
+        """ACS: verify Pod annotations assign correct SG and VSwitches."""
+        rc, out, _ = self.kubectl(
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw -o jsonpath="
             "'{.items[0].metadata.annotations.network\\.alibabacloud\\.com/security-group-ids}'"
         )
         sg_ids = out.strip("'")
@@ -617,9 +721,8 @@ class NetworkValidator:
             self.add_result("Annotations", "security-group-ids 注解", False,
                             f"缺失或无效: {out}", severity="P0")
 
-        # Check network.alibabacloud.com/vswitch-ids (ACS annotation)
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw -o jsonpath="
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw -o jsonpath="
             "'{.items[0].metadata.annotations.network\\.alibabacloud\\.com/vswitch-ids}'"
         )
         vsw_ids = out.strip("'")
@@ -631,9 +734,8 @@ class NetworkValidator:
             self.add_result("Annotations", "vswitch-ids 注解", False,
                             f"缺失或无效: {out}", severity="P0")
 
-        # Check network.alibabacloud.com/security-group-id (actual ENI binding)
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw -o jsonpath="
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw -o jsonpath="
             "'{.items[0].metadata.annotations.network\\.alibabacloud\\.com/security-group-id}'"
         )
         actual_sg = out.strip("'")
@@ -651,7 +753,7 @@ class NetworkValidator:
         print("\n=== 7. Sandbox Pod 网络连通性测试 ===")
 
         rc, pod_name, _ = self.kubectl(
-            "get pods -n default -l app=openclaw "
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
             "-o jsonpath='{.items[0].metadata.name}' "
             "--field-selector=status.phase=Running"
         )
@@ -662,7 +764,7 @@ class NetworkValidator:
         self.add_result("NetTest", "查找 Sandbox Pod", True, f"使用: {pod_name}")
 
         rc, pod_ip, _ = self.kubectl(
-            f"get pod {pod_name} -n default -o jsonpath='{{.status.podIP}}'"
+            f"get pod {pod_name} -n {self.sandbox_namespace} -o jsonpath='{{.status.podIP}}'"
         )
         pod_ip = pod_ip.strip("'")
         if pod_ip:
@@ -677,7 +779,7 @@ class NetworkValidator:
                             + ("" if is_openclaw_cidr else " [不在 OpenClaw 网段!]"),
                             severity="P0")
 
-        ns = "default"
+        ns = self.sandbox_namespace
         container = "openclaw"
 
         def _curl_http_code(url: str, timeout_s: int = 3) -> Tuple[int, str]:
@@ -842,12 +944,102 @@ class NetworkValidator:
                 except (json.JSONDecodeError, KeyError):
                     pass
 
+    # ==================== 7b. Sandbox 互访隔离 ====================
+    def test_sandbox_inter_isolation(self):
+        """验证两个 Sandbox Pod 之间不能互相访问（Sandbox 间隔离）"""
+        print("\n=== 7b. Sandbox 互访隔离测试 ===")
+
+        rc, out, _ = self.kubectl(
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
+            "--field-selector=status.phase=Running "
+            "-o jsonpath='{.items[*].metadata.name}'"
+        )
+        pods = out.strip("'").split()
+        if len(pods) < 2:
+            self.add_result("SandboxIsolation", "Sandbox 互访测试", True,
+                            f"仅有 {len(pods)} 个 Sandbox Pod，跳过互访测试（需 >=2）")
+            return
+
+        pod_a = pods[0]
+        pod_b = pods[1]
+
+        # 获取 Pod B 的 IP
+        rc, ip_b, _ = self.kubectl(
+            f"get pod {pod_b} -n {self.sandbox_namespace} -o jsonpath='{{.status.podIP}}'"
+        )
+        ip_b = ip_b.strip("'")
+        if not ip_b:
+            self.add_result("SandboxIsolation", "获取 Pod B IP", False, "无法获取 Pod IP")
+            return
+
+        self.add_result("SandboxIsolation", "测试对象",
+                        True, f"Pod A={pod_a}, Pod B={pod_b} ({ip_b})")
+
+        ns = self.sandbox_namespace
+        container = "openclaw"
+
+        def _curl(url: str, timeout_s: int = 3) -> str:
+            rc, out, _ = self.run_cmd(
+                f'kubectl exec {pod_a} -n {ns} -c {container} -- '
+                f'bash -c "curl -s -o /dev/null -w \'%{{http_code}}\' '
+                f'--connect-timeout {timeout_s} \'{url}\' 2>&1"',
+                timeout=timeout_s + 8
+            )
+            return out.strip().strip("'")
+
+        # 7b-1. TCP 80 互访（应被拒绝）
+        code = _curl(f"http://{ip_b}")
+        self.add_result("SandboxIsolation", "Sandbox 互访 TCP 80",
+                        code in ("000", ""),
+                        f"HTTP {code} (000=正确拒绝)" if code in ("000", "")
+                        else f"HTTP {code} (可达! Sandbox 间无隔离)",
+                        severity="P0")
+
+        # 7b-2. Gateway 端口 18789 互访（最关键——应被拒绝）
+        code = _curl(f"http://{ip_b}:18789")
+        self.add_result("SandboxIsolation", "Sandbox 互访 Gateway 18789",
+                        code in ("000", ""),
+                        f"HTTP {code} (000=正确拒绝)" if code in ("000", "")
+                        else f"HTTP {code} (Gateway 可达! 用户可访问他人 Sandbox)",
+                        severity="P0")
+
+        # 7b-3. 高端口（随机服务）互访
+        code = _curl(f"http://{ip_b}:8080")
+        self.add_result("SandboxIsolation", "Sandbox 互访 TCP 8080",
+                        code in ("000", ""),
+                        f"HTTP {code}" if code in ("000", "")
+                        else f"HTTP {code} (端口 8080 可达)",
+                        severity="P1")
+
+        # 7b-4. 安全组类型说明（normal SG 存在同 SG 互通隐患）
+        if not self.kubectl_only and self.sg_id:
+            rc2, out2, _ = self.aliyun_cli(
+                f"ecs DescribeSecurityGroupAttribute --RegionId {self.region} "
+                f"--SecurityGroupId {self.sg_id} --Direction all"
+            )
+            if rc2 == 0:
+                try:
+                    sg = json.loads(out2)
+                    sg_type = sg.get("SecurityGroupType", "normal")
+                    if sg_type == "normal":
+                        gateway_blocked = code in ("000", "")
+                        self.add_result(
+                            "SandboxIsolation", "normal SG 同组互通风险",
+                            gateway_blocked,
+                            "normal 安全组内实例默认互通，Poseidon TrafficPolicy 可补全此隔离"
+                            if not gateway_blocked
+                            else "已隔离（可能通过 NetworkPolicy 或其他机制）",
+                            severity="P0" if not gateway_blocked else "P1"
+                        )
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
     # ==================== 8. Security hardening ====================
     def test_sandbox_security_hardening(self):
         print("\n=== 8. Sandbox 安全加固 ===")
 
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw "
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
             "-o jsonpath='{.items[0].spec.automountServiceAccountToken}' "
             "--field-selector=status.phase=Running"
         )
@@ -857,7 +1049,7 @@ class NetworkValidator:
                         f"值: {val}" if val else "未设置 (默认 true)")
 
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw "
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
             "-o jsonpath='{.items[0].spec.enableServiceLinks}' "
             "--field-selector=status.phase=Running"
         )
@@ -868,7 +1060,7 @@ class NetworkValidator:
 
         # Check K8s token mount
         rc, out, _ = self.kubectl(
-            "get pods -n default -l app=openclaw "
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
             "-o jsonpath='{.items[0].spec.volumes[*].name}' "
             "--field-selector=status.phase=Running"
         )
@@ -919,7 +1111,7 @@ class NetworkValidator:
         print("\n=== 10. PrivateZone DNS 解析 ===")
 
         rc, pod_name, _ = self.kubectl(
-            "get pods -n default -l app=openclaw "
+            f"get pods -n {self.sandbox_namespace} -l app=openclaw "
             "-o jsonpath='{.items[0].metadata.name}' "
             "--field-selector=status.phase=Running"
         )
@@ -931,7 +1123,7 @@ class NetworkValidator:
         domain = self.stack_params.get("E2BDomainAddress", "agent-vpc.infra")
 
         rc, out, _ = self.run_cmd(
-            f'kubectl exec {pod_name} -n default -c openclaw -- '
+            f'kubectl exec {pod_name} -n {self.sandbox_namespace} -c openclaw -- '
             f'bash -c "getent hosts test.{domain} 2>&1 || echo LOOKUP_FAILED"',
             timeout=10
         )
@@ -942,7 +1134,7 @@ class NetworkValidator:
                         else f"无法解析: {out[:200]}")
 
         rc, out, _ = self.kubectl(
-            f"exec {pod_name} -n default -c openclaw -- cat /etc/resolv.conf",
+            f"exec {pod_name} -n {self.sandbox_namespace} -c openclaw -- cat /etc/resolv.conf",
             timeout=10
         )
         if rc == 0:
@@ -974,7 +1166,7 @@ class NetworkValidator:
             except json.JSONDecodeError:
                 self.add_result("TrafficPolicy", "GlobalTrafficPolicy 解析", False, "无效 JSON")
 
-        rc, out, _ = self.kubectl("get trafficpolicy -n default -o json")
+        rc, out, _ = self.kubectl(f"get trafficpolicy -n {self.sandbox_namespace} -o json")
         if rc == 0:
             try:
                 data = json.loads(out)
@@ -1004,6 +1196,8 @@ class NetworkValidator:
             print("\n已终止: 无法连接集群")
             return False
 
+        self._detect_cluster_mode()
+
         if not self.kubectl_only:
             self.test_vpc_vswitch_topology()
             self.test_security_group_rules()
@@ -1013,6 +1207,7 @@ class NetworkValidator:
         self.test_core_resources()
         self.test_sandbox_pod_annotations()
         self.test_sandbox_network_connectivity()
+        self.test_sandbox_inter_isolation()
         self.test_sandbox_security_hardening()
         self.test_alb_ingress()
         self.test_privatezone()

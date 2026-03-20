@@ -719,8 +719,8 @@ class OpenClawTestCLI:
             self.phases.append(phase)
             return phase
 
-        # Check TestPod exists
-        rc, pod_status, _ = self.kubectl("get pod acs-sandbox-test-pod -n default -o jsonpath='{.status.phase}'")
+        sandbox_ns = self.stack_params.get("SandboxNamespace", "default")
+        rc, pod_status, _ = self.kubectl(f"get pod acs-sandbox-test-pod -n {sandbox_ns} -o jsonpath='{{.status.phase}}'")
         pod_status = pod_status.strip("'")
         if rc != 0 or pod_status != "Running":
             self._fail(f"TestPod 不存在或未就绪 (status={pod_status})")
@@ -734,7 +734,7 @@ class OpenClawTestCLI:
         cert_path = os.path.join(PROJECT_ROOT, "agent-vpc.infra", "fullchain.pem")
         if os.path.exists(cert_path):
             rc, _, _ = self.run_cmd(
-                f"kubectl cp {cert_path} default/acs-sandbox-test-pod:/app/ca-fullchain.pem"
+                f"kubectl cp {cert_path} {sandbox_ns}/acs-sandbox-test-pod:/app/ca-fullchain.pem"
             )
             if rc == 0:
                 self._ok("已更新 TestPod 证书 (fullchain.pem)")
@@ -829,7 +829,7 @@ class OpenClawTestCLI:
         """)
 
         rc, out, err = self.kubectl(
-            f"exec acs-sandbox-test-pod -n default -- python3 -c {self._shell_quote(test_script)}",
+            f"exec acs-sandbox-test-pod -n {sandbox_ns} -- python3 -c {self._shell_quote(test_script)}",
             timeout=180,
         )
 
