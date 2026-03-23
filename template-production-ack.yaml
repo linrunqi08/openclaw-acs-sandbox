@@ -561,16 +561,23 @@ Parameters:
   InstanceType:
     Type: CommaDelimitedList
     Default:
-      - ecs.u1-c1m2.xlarge
+      - ecs.c7.xlarge
     AssociationProperty: ALIYUN::ECS::Instance::InstanceType
     AssociationPropertyMetadata:
       CreateACKClusterParams:
         NetworkPlugin: terway-eniip
-      Visible:
-        Condition:
-          Fn::Equals:
-            - NewAck
-            - ${ClusterOption}
+      Constraints:
+        InstanceTypeFamily:
+          - ecs.c7
+          - ecs.g7
+          - ecs.r7
+          - ecs.c7a
+          - ecs.g7a
+          - ecs.r7a
+        vCPU:
+          - 4
+        Memory:
+          - 8
     Label:
       en: Worker Instance Type
       zh-cn: Worker 节点实例规格
@@ -1051,7 +1058,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1065,7 +1072,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1118,7 +1125,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1140,7 +1147,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1155,7 +1162,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1183,7 +1190,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
@@ -1197,7 +1204,7 @@ Resources:
               - Ref: VpcCidrBlock
               - Fn::Jq:
                   - First
-                  - .CidrBlock
+                  - .[0].CidrBlock
                   - Fn::GetAtt:
                       - VpcDataSource
                       - Vpcs
