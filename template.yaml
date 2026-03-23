@@ -641,7 +641,7 @@ Parameters:
     Label:
       en: Whether to enable the public ip.
       zh-cn: 是否支持公网访问
-    Default: true
+    Default: false
   EnablePrivateZone:
     Type: Boolean
     Description:
