@@ -500,6 +500,8 @@ spec:
 ### OpenClaw 日志
 SLS k8s原生能力在ACK集群内通过 loongcollector 组件提供，通过CR的方式创建采集配置，对应的CRD资源名为ClusterAliyunPipelineConfig。
 
+![img_16.png](img_16.png)
+
 SLS提供开箱即用的OpenClaw采集配置，可以通过SLS控制台访问OpenClaw日志，对应的SLS的Project为k8s-log-${ack集群id},
 - OpenClaw Runtime日志（网关 / 应用）
   - 对应的 logstore 为 openclaw-runtime
@@ -514,6 +516,8 @@ SLS提供开箱即用的OpenClaw采集配置，可以通过SLS控制台访问Ope
 - OpenClaw 行为分析大盘: 对 OpenClaw 的运行行为进行全量记录与分类统计
 - OpenClaw 审计大盘: 从行为总览、高危命令、提示词注入、数据外泄等维度展开，提供实时行为监控、威胁识别与事后溯源的完整能力
 - OpenClaw Token 分析大盘: 从整体概览、模型维度趋势、会话等维度展开，提供用量监控、成本分析与异常发现能力
+
+![img_15.png](img_15.png)
 
 注意：
 内置采集配置仅针对demo镜像，自定义镜像的日志路径、容器过滤条件等可能有所不同，可以在ACK集群内通过修改对应的CR进行配置修正。
